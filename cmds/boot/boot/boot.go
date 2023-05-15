@@ -32,6 +32,7 @@ import (
 	"flag"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/u-root/u-root/pkg/boot"
 	"github.com/u-root/u-root/pkg/boot/bootcmd"
@@ -105,6 +106,7 @@ func main() {
 	menuEntries := menu.OSImages(*verbose, images...)
 	menuEntries = append(menuEntries, menu.Reboot{})
 	menuEntries = append(menuEntries, menu.StartShell{})
+	menu.SetInitialTimeout(1 * time.Second)
 
 	// Boot does not return.
 	bootcmd.ShowMenuAndBoot(menuEntries, mountPool, *noLoad, *noExec)
