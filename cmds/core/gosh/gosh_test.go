@@ -36,62 +36,80 @@ func TestRun(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := run(false, tt.args...); err != nil {
+			if err := run(&bytes.Buffer{}, &bytes.Buffer{}, &bytes.Buffer{}, false, tt.args...); err != nil {
 				t.Errorf("Unexpected error: %v", err)
 			}
 		})
 	}
 }
 
-func TestRunCmd(t *testing.T) {
+func TestRunFail(t *testing.T) {
 	for _, tt := range []struct {
-		name    string
-		pairs   []string
-		wantErr error
+		name string
+		args []string
 	}{
 		{
-			name: "echo foo",
-			pairs: []string{
-				"echo foo",
-				"foo",
-			},
+			name: "run a bad file",
+			args: []string{"/"},
 		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := run(&bytes.Buffer{}, &bytes.Buffer{}, &bytes.Buffer{}, false, tt.args...); err == nil {
+				t.Errorf("want err, got nil")
+			}
+		})
+	}
+}
+
+func TestRunScript(t *testing.T) {
+	d := t.TempDir()
+	script := filepath.Join(d, "a.sh")
+	if err := os.WriteFile(script, []byte("echo hi\n"), 0666); err != nil {
+		t.Fatalf("Writing %q: got %v, want nil", script, err)
+	}
+
+	for _, tt := range []struct {
+		name  string
+		pairs []string
+		err   error
+	}{
+
 		{
-			name: "quoted echo",
+			name: "bad file",
 			pairs: []string{
-				"echo 'foo\nbar'",
-				"foo\nbar",
-			},
-		},
-		{
-			name: "exit 1",
-			pairs: []string{
-				"exit 1; echo foo",
+				"/",
 				"",
 			},
-			wantErr: errors.New("exit status 1"),
+			err: errors.New("read /: is a directory"),
 		},
 		{
-			name: "not parsable",
+			name: "bad file",
 			pairs: []string{
-				"(",
+				"bad file",
 				"",
 			},
-			wantErr: errors.New("not parsable:1:1: reached EOF without matching ( with )"),
+			err: errors.New("open bad file: no such file or directory"),
+		},
+		{
+			name: "echo script",
+			pairs: []string{
+				script,
+				"",
+			},
+			err: errors.New("open bad file: no such file or directory"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			runner, err := interp.New(interp.StdIO(strings.NewReader(tt.pairs[0]), &buf, &buf))
+			runner, err := interp.New(interp.StdIO(nil, &buf, &buf))
 			if err != nil {
 				t.Errorf("Failed creating runner: %v", err)
 			}
 
-			parser := syntax.NewParser()
-
-			if err := runCmd(runner, parser, strings.NewReader(tt.pairs[0]), tt.name); err != nil {
-				if err.Error() != tt.wantErr.Error() {
-					t.Errorf("Failed running command: %v", err)
+			if err := runScript(runner, syntax.NewParser(), tt.pairs[0]); err != nil {
+				// can't use errors.Is: please ask mvdan to fix that.
+				if fmt.Sprintf("%v", err) != fmt.Sprintf("%v", tt.err) {
+					t.Errorf("got '%v', want '%v'", err, tt.err)
 				}
 			}
 
@@ -117,7 +135,7 @@ func TestRunInteractive(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Skip("Find out how to instrument bubbline")
+			t.Skip("Currently broken")
 			inReader, inWriter := io.Pipe()
 			outReader, outWriter := io.Pipe()
 			runner, err := interp.New(interp.StdIO(inReader, outWriter, outWriter))
@@ -125,9 +143,7 @@ func TestRunInteractive(t *testing.T) {
 				t.Errorf("Failed creating runner: %v", err)
 			}
 
-			parser := syntax.NewParser()
-
-			if err := runInteractive(runner, parser, outWriter, outWriter, false); err != nil && tt.wantErr == nil {
+			if err := runInteractive(runner, syntax.NewParser(), outWriter, outWriter); err != nil && tt.wantErr == nil {
 				t.Errorf("Unexpected error: %v", err)
 			} else if tt.wantErr != nil && fmt.Sprint(err) != tt.wantErr.Error() {
 				t.Errorf("Want error %q, got: %v", tt.wantErr, err)

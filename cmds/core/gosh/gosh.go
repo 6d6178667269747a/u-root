@@ -10,11 +10,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -30,36 +33,22 @@ import (
 const HISTFILE = "/tmp/bubble-sh.history" //TODO: make configurable
 
 func main() {
-	completion := true
-	// If UROOT_SHELL_TABCOMPLETE_DISABLE
-	//   is not set, completion is enabled.
-	//   is set, and it has value "0", "false", or "no": completion is enabled.
-	//   otherwise, completion is DISABLED.
-	if c, ok := os.LookupEnv("UROOT_SHELL_TABCOMPLETE_DISABLE"); ok {
-		switch c {
-		// enabled.
-		case "0", "false", "no":
-		default:
-			completion = false
-		}
-	}
+	completion := flag.Bool("comp", false, "Enable tabcompletion and a more feature rich editline implementation")
 
 	flag.Parse()
-
-	err := run(completion, flag.Args()...)
+	err := run(os.Stdin, os.Stdout, os.Stderr, *completion, flag.Args()...)
 
 	if status, ok := interp.IsExitStatus(err); ok {
 		os.Exit(int(status))
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 }
 
-func run(completion bool, args ...string) error {
-	runner, err := interp.New(interp.StdIO(os.Stdin, os.Stdout, os.Stderr))
+func run(stdin io.Reader, stdout, stderr io.Writer, completion bool, args ...string) error {
+	runner, err := interp.New(interp.StdIO(stdin, stdout, stderr))
 	if err != nil {
 		return err
 	}
@@ -68,35 +57,30 @@ func run(completion bool, args ...string) error {
 
 	if len(args) > 0 {
 		if strings.HasSuffix(args[0], "sh") {
-			return runScript(runner, parser, args[0], args...)
+			return runScript(runner, parser, args[0])
 		}
 
 		return runCmd(runner, parser, strings.NewReader(strings.Join(args, " ")), args[0])
 	}
 
-	if len(args) == 0 {
-		if term.IsTerminal(int(os.Stdin.Fd())) {
-			return runInteractive(runner, parser, os.Stdout, os.Stderr, completion)
+	if r, ok := stdin.(*os.File); ok && term.IsTerminal(int(r.Fd())) {
+		if completion {
+			return runInteractive(runner, parser, stdout, stderr)
 		}
-
-		return runCmd(runner, parser, os.Stdin, "")
+		return runInteractiveSimple(runner, parser, stdin, stdout)
 	}
 
-	return nil
+	return runCmd(runner, parser, stdin, "")
 }
 
-func runScript(runner *interp.Runner, parser *syntax.Parser, name string, args ...string) error {
-	if len(args) > 1 {
-		return fmt.Errorf("no support for trailing arguments to script: %v", args[1:])
-	}
-
-	f, err := os.Open(name)
+func runScript(runner *interp.Runner, parser *syntax.Parser, file string) error {
+	f, err := os.Open(file)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	prog, err := parser.Parse(f, name)
+	prog, err := parser.Parse(f, file)
 	if err != nil {
 		return err
 	}
@@ -107,17 +91,76 @@ func runScript(runner *interp.Runner, parser *syntax.Parser, name string, args .
 }
 
 func runCmd(runner *interp.Runner, parser *syntax.Parser, command io.Reader, name string) error {
-	prog, err := parser.Parse(command, name)
-	if err != nil {
-		return err
+	scanner := bufio.NewScanner(command)
+	defer runner.Reset()
+
+	for scanner.Scan() {
+		h := scanner.Text()
+		if err := scanner.Err(); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		prog, err := parser.Parse(bytes.NewBuffer([]byte(h)), name)
+		if err != nil {
+			return err
+		}
+
+		if err := runner.Run(context.Background(), prog); err != nil {
+			return err
+		}
 	}
-
-	runner.Reset()
-
-	return runner.Run(context.Background(), prog)
+	return nil
 }
 
-func runInteractive(runner *interp.Runner, parser *syntax.Parser, stdout, stderr io.Writer, completion bool) error {
+func runInteractiveSimple(runner *interp.Runner, parser *syntax.Parser, stdin io.Reader, stdout io.Writer) error {
+	fmt.Fprintf(stdout, "$ ")
+
+	var runErr error
+
+	// The following code is used to intercept SIGINT signals.
+	// Calling signal.Ignore wouldn't work as child prcesses inherit this trait.
+	// We only want to catch SIGINTs that are propagated from a child,
+	// the child itself should get the signal as per usual.
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt)
+	go func(ch chan os.Signal) {
+		for {
+			<-ch
+		}
+	}(ch)
+
+	for {
+		fn := func(stmts []*syntax.Stmt) bool {
+			if parser.Incomplete() {
+				fmt.Fprintf(stdout, "> ")
+				return true
+			}
+			for _, stmt := range stmts {
+				runErr = runner.Run(context.Background(), stmt)
+				if runner.Exited() {
+					return false
+				}
+			}
+			fmt.Fprintf(stdout, "$ ")
+			return true
+		}
+
+		if err := parser.Interactive(stdin, fn); err != nil {
+			return err
+		}
+
+		if runErr != nil {
+			fmt.Fprintf(stdout, "error: %s\n", runErr.Error())
+			runErr = nil
+		} else {
+			return nil
+		}
+	}
+}
+
+func runInteractive(runner *interp.Runner, parser *syntax.Parser, stdout, stderr io.Writer) error {
 	input := bubbline.New()
 
 	if err := input.LoadHistory(HISTFILE); err != nil {
@@ -126,9 +169,7 @@ func runInteractive(runner *interp.Runner, parser *syntax.Parser, stdout, stderr
 
 	input.SetAutoSaveHistory(HISTFILE, true)
 
-	if completion {
-		input.AutoComplete = autocomplete
-	}
+	input.AutoComplete = autocomplete
 
 	var runErr error
 
@@ -161,22 +202,26 @@ func runInteractive(runner *interp.Runner, parser *syntax.Parser, stdout, stderr
 			} else {
 				fmt.Fprintf(stderr, "error: %s\n", err.Error())
 			}
+			err = nil
 			continue
 		}
 
-		if line == "exit" {
-			break
-		}
-
-		if line == "nocomplete" {
+		switch line {
+		case "exit":
+			goto exit
+		case "disablecomp":
 			input.AutoComplete = nil
 			continue
+		case "enablecomp":
+			input.AutoComplete = autocomplete
+			continue
+		default:
 		}
 
 		// check if we want to execute a shell script
 		fields := strings.Fields(line)
 		if len(fields) > 0 && strings.HasSuffix(fields[0], "sh") {
-			if err := runScript(runner, parser, fields[0], fields...); err != nil {
+			if err := runScript(runner, parser, fields[0]); err != nil {
 				fmt.Fprintf(stderr, "error: %s\n", err.Error())
 			}
 
@@ -203,6 +248,6 @@ func runInteractive(runner *interp.Runner, parser *syntax.Parser, stdout, stderr
 			fmt.Fprintf(stderr, "error: %s\n", err.Error())
 		}
 	}
-
+exit:
 	return nil
 }

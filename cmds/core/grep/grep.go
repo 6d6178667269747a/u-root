@@ -201,13 +201,15 @@ func (c *cmd) run() error {
 	var re *regexp.Regexp
 	if !c.fixed {
 		re = regexp.MustCompile(r)
+	} else if c.expr == "" {
+		c.expr = c.args[0]
 	}
 	// very special case, just stdin
 	if len(c.args) < 2 {
 		c.nGrep++
 		go c.grep(&grepCommand{c.stdin, "<stdin>"}, re)
 	} else {
-		c.showName = (len(c.args[1:]) > 1 || c.recursive) && !c.headers
+		c.showName = (len(c.args[1:]) > 1 || c.recursive || c.noShowMatch) && !c.headers
 		// generate a chan of file names, bounded by the size of the chan. This in turn
 		// throttles the opens.
 		treeNames := make(chan string, 128)

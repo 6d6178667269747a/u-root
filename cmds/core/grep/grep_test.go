@@ -130,6 +130,19 @@ func TestStdinGrep(t *testing.T) {
 			p:      params{fixed: true, caseInsensitive: true},
 			args:   []string{"[A-z]"},
 		},
+		{
+			input:  "a\nb\nc\n",
+			output: "b\n",
+			err:    nil,
+			p:      params{fixed: true},
+			args:   []string{"b"},
+		},
+		{
+			input:  "a\nb\nc\n",
+			output: "b\n",
+			err:    nil,
+			p:      params{fixed: true, expr: "b"},
+		},
 	}
 
 	for _, test := range tests {
@@ -184,6 +197,12 @@ func TestFilesGrep(t *testing.T) {
 			output: fmt.Sprintf("%s:hello\n", f2.Name()),
 			err:    nil,
 			args:   []string{"hello", f1.Name(), f2.Name()},
+		},
+		{
+			output: fmt.Sprintf("%s\n", f1.Name()),
+			err:    nil,
+			p:      params{noShowMatch: true},
+			args:   []string{"nix", f1.Name()},
 		},
 	}
 
