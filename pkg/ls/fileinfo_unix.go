@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !plan9
-// +build !plan9
+//go:build !plan9 && !windows
 
 package ls
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/user"
 	"regexp"
@@ -44,7 +44,14 @@ type FileInfo struct {
 func FromOSFileInfo(path string, fi os.FileInfo) FileInfo {
 	var link string
 
-	s := fi.Sys().(*syscall.Stat_t)
+	// A filesystem with a bug will result
+	// in sys not being the right type.
+	// This turns out to be surprisingly messy to test.
+	UID, GID, rdev := uint32(math.MaxUint32), uint32(math.MaxUint32), uint64(math.MaxUint64)
+	if s, ok := fi.Sys().(*syscall.Stat_t); ok {
+		UID, GID, rdev = s.Uid, s.Gid, uint64(s.Rdev)
+	}
+
 	if fi.Mode()&os.ModeType == os.ModeSymlink {
 		if l, err := os.Readlink(path); err != nil {
 			link = err.Error()
@@ -56,9 +63,9 @@ func FromOSFileInfo(path string, fi os.FileInfo) FileInfo {
 	return FileInfo{
 		Name:          fi.Name(),
 		Mode:          fi.Mode(),
-		Rdev:          uint64(s.Rdev),
-		UID:           s.Uid,
-		GID:           s.Gid,
+		Rdev:          rdev,
+		UID:           UID,
+		GID:           GID,
 		Size:          fi.Size(),
 		MTime:         fi.ModTime(),
 		SymlinkTarget: link,
